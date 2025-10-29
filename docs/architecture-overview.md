@@ -15,8 +15,8 @@ Este documento resume la arquitectura lógica y física resultante de la platafo
 
 ```mermaid
 graph TD
-  subgraph ControlPlane[Control Plane (HA)]
-    APIServer[kube-apiserver (TLS, Audit Logging)]
+  subgraph ControlPlane["Control Plane (HA)"]
+    APIServer[kube-apiserver TLS Audit]
     Scheduler[kube-scheduler]
     Controller[kube-controller-manager]
     Etcd[(etcd cluster encriptado)]
@@ -24,48 +24,54 @@ graph TD
     ArgoCD[ArgoCD Application Controller]
   end
 
-  subgraph Workers[Nodos Worker en Múltiples Zonas]
+  subgraph Workers["Nodos Worker en Múltiples Zonas"]
     Kubelet[kubelet + kube-proxy]
     Istio[Istio Sidecars]
-    Apps[Workloads (Dev/Staging/Prod)]
+    Apps[Workloads Dev/Staging/Prod]
     ZabbixAgents[Zabbix & Wazuh DaemonSets]
-    Netdata[Netdata + node-exporter + kube-state-metrics]
+    Netdata[Netdata + node-exporter]
   end
 
-  subgraph Seguridad[Servicios de Seguridad]
+  subgraph Seguridad["Servicios de Seguridad"]
     Vault[Vault / Secrets Encryption]
     RBAC[Roles & Bindings]
-    PSP[Pod Security Standards Labels]
+    PSP[Pod Security Standards]
   end
 
-  subgraph Observabilidad[Observabilidad]
+  subgraph Observabilidad["Observabilidad"]
     Zabbix[Zabbix Server HA]
     Influx[InfluxDB + Telegraf]
     ELK[Elasticsearch + Logstash + Kibana]
     WazuhMgr[Wazuh Manager]
   end
 
-  subgraph Networking[Red y Exposición]
+  subgraph Networking["Red y Exposición"]
     Calico[Calico/Cilium CNI]
     IstioGW[Istio Ingress/Egress]
-    NginxIC[NGINX Ingress Controller + cert-manager]
+    NginxIC[NGINX Ingress Controller]
     LB[External Load Balancer]
   end
 
   Users[Usuarios/CI Pipelines]
-  ExternalSvc[Servicios Externos / S3 / Base de Datos]
+  ExternalSvc[Servicios Externos / S3 / DB]
 
-  Users -->|kubectl/API| LB --> NginxIC --> APIServer
+  Users -->|kubectl/API| LB
+  LB --> NginxIC
+  NginxIC --> APIServer
   APIServer --> Etcd
   ArgoCD --> APIServer
-  APIServer --> Workers
-  Workers --> Observabilidad
-  Workers --> Seguridad
-  Observabilidad -->|Alertas| Users
-  Seguridad --> APIServer
+  APIServer --> Kubelet
+  Kubelet --> Apps
+  ZabbixAgents --> Zabbix
+  Netdata --> Influx
+  Apps --> ELK
+  Vault --> APIServer
+  RBAC --> APIServer
+  PSP --> APIServer
+  Zabbix -->|Alertas| Users
   Kubelet --> Calico
-  Calico --> Networking
-  NginxIC --> IstioGW --> Apps
+  NginxIC --> IstioGW
+  IstioGW --> Apps
   Apps --> ExternalSvc
 ```
 
