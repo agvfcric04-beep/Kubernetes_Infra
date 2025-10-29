@@ -1,0 +1,713 @@
+# Zabbix configuration for HA deployment with external database (PostgreSQL service referenced via DNS).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zabbix-server-config
+  namespace: platform
+data:
+  zabbix_server.conf: |
+    LogType=console
+    Timeout=10
+    StartPollers=10
+    CacheSize=256M
+    StartPollersUnreachable=5
+    StartTrappers=5
+    StartPingers=5
+    StartDiscoverers=3
+    StartLLDProcessors=5
+    JavaGateway=platform/zabbix-java-gateway
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: zabbix-server
+  namespace: platform
+spec:
+  serviceName: zabbix-server
+  replicas: 2
+  selector:
+    matchLabels:
+      app: zabbix-server
+  template:
+    metadata:
+      labels:
+        app: zabbix-server
+    spec:
+      serviceAccountName: platform-ops
+      priorityClassName: platform-critical
+      containers:
+        - name: zabbix-server
+          image: zabbix/zabbix-server-pgsql:alpine-6.4-latest
+          env:
+            - name: DB_SERVER_HOST
+              value: microservice-postgres.dev.svc.cluster.local
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-app-secret
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-app-secret
+                  key: password
+            - name: ZBX_JAVAGATEWAY
+              value: zabbix-java-gateway.platform.svc.cluster.local
+          ports:
+            - containerPort: 10051
+              name: trapper
+          volumeMounts:
+            - name: config
+              mountPath: /etc/zabbix/zabbix_server.conf
+              subPath: zabbix_server.conf
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsUser: 1997
+            runAsGroup: 1995
+            runAsNonRoot: true
+      volumes:
+        - name: config
+          configMap:
+            name: zabbix-server-config
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: topology.kubernetes.io/zone
+                labelSelector:
+                  matchLabels:
+                    app: zabbix-server
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zabbix-server
+  namespace: platform
+spec:
+  selector:
+    app: zabbix-server
+  ports:
+    - port: 10051
+      targetPort: 10051
+      name: trapper
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zabbix-java-gateway
+  namespace: platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: zabbix-java-gateway
+  template:
+    metadata:
+      labels:
+        app: zabbix-java-gateway
+    spec:
+      containers:
+        - name: zabbix-java-gateway
+          image: zabbix/zabbix-java-gateway:alpine-6.4-latest
+          ports:
+            - containerPort: 10052
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1997
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zabbix-java-gateway
+  namespace: platform
+spec:
+  selector:
+    app: zabbix-java-gateway
+  ports:
+    - port: 10052
+      targetPort: 10052
+---
+# Zabbix agent DaemonSet to run on every node collecting metrics.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: zabbix-agent
+  namespace: platform
+spec:
+  selector:
+    matchLabels:
+      app: zabbix-agent
+  template:
+    metadata:
+      labels:
+        app: zabbix-agent
+    spec:
+      serviceAccountName: platform-ops
+      containers:
+        - name: zabbix-agent
+          image: zabbix/zabbix-agent2:alpine-6.4-latest
+          env:
+            - name: ZBX_SERVER_HOST
+              value: zabbix-server.platform.svc.cluster.local
+          securityContext:
+            runAsUser: 1997
+            runAsGroup: 1995
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+      tolerations:
+        - operator: Exists
+---
+# Wazuh DaemonSet to capture security logs from all nodes and pods.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: wazuh-agent
+  namespace: platform
+spec:
+  selector:
+    matchLabels:
+      app: wazuh-agent
+  template:
+    metadata:
+      labels:
+        app: wazuh-agent
+    spec:
+      serviceAccountName: platform-ops
+      containers:
+        - name: wazuh-agent
+          image: wazuh/wazuh-agent:4.7.2
+          env:
+            - name: MANAGER_IP
+              value: wazuh-manager.platform.svc.cluster.local
+          securityContext:
+            runAsUser: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 300m
+              memory: 512Mi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: wazuh-manager
+  namespace: platform
+spec:
+  serviceName: wazuh-manager
+  replicas: 2
+  selector:
+    matchLabels:
+      app: wazuh-manager
+  template:
+    metadata:
+      labels:
+        app: wazuh-manager
+    spec:
+      containers:
+        - name: wazuh-manager
+          image: wazuh/wazuh:4.7.2
+          ports:
+            - containerPort: 1514
+              name: tcp-syslog
+            - containerPort: 1515
+              name: registration
+          volumeMounts:
+            - name: wazuh-data
+              mountPath: /var/ossec/data
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+      volumeClaimTemplates:
+        - metadata:
+            name: wazuh-data
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            storageClassName: ebs-gp3-ha
+            resources:
+              requests:
+                storage: 100Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wazuh-manager
+  namespace: platform
+spec:
+  selector:
+    app: wazuh-manager
+  ports:
+    - port: 1514
+      name: tcp-syslog
+      targetPort: 1514
+    - port: 1515
+      name: registration
+      targetPort: 1515
+---
+# Elasticsearch cluster for log storage (3 master/data nodes) and Kibana for visualization.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: elastic-config
+  namespace: platform
+data:
+  elasticsearch.yml: |
+    cluster.name: logging-cluster
+    discovery.type: zen
+    discovery.seed_hosts: ["elasticsearch-0.elasticsearch.platform.svc.cluster.local", "elasticsearch-1.elasticsearch.platform.svc.cluster.local", "elasticsearch-2.elasticsearch.platform.svc.cluster.local"]
+    cluster.initial_master_nodes: ["elasticsearch-0", "elasticsearch-1", "elasticsearch-2"]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  namespace: platform
+spec:
+  serviceName: elasticsearch
+  replicas: 3
+  selector:
+    matchLabels:
+      app: elasticsearch
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        sysctls:
+          - name: vm.max_map_count
+            value: "262144"
+      containers:
+        - name: elasticsearch
+          image: docker.elastic.co/elasticsearch/elasticsearch:8.11.3
+          env:
+            - name: ES_JAVA_OPTS
+              value: "-Xms1g -Xmx1g"
+          ports:
+            - containerPort: 9200
+            - containerPort: 9300
+          volumeMounts:
+            - name: elastic-config
+              mountPath: /usr/share/elasticsearch/config/elasticsearch.yml
+              subPath: elasticsearch.yml
+            - name: elastic-data
+              mountPath: /usr/share/elasticsearch/data
+          resources:
+            requests:
+              cpu: "1"
+              memory: 4Gi
+            limits:
+              cpu: "2"
+              memory: 8Gi
+          securityContext:
+            runAsNonRoot: true
+      volumes:
+        - name: elastic-config
+          configMap:
+            name: elastic-config
+      volumeClaimTemplates:
+        - metadata:
+            name: elastic-data
+          spec:
+            storageClassName: ebs-gp3-ha
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 200Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: platform
+spec:
+  clusterIP: None
+  selector:
+    app: elasticsearch
+  ports:
+    - port: 9200
+      name: http
+    - port: 9300
+      name: inter-node
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+  namespace: platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: kibana
+  template:
+    metadata:
+      labels:
+        app: kibana
+    spec:
+      containers:
+        - name: kibana
+          image: docker.elastic.co/kibana/kibana:8.11.3
+          env:
+            - name: ELASTICSEARCH_HOSTS
+              value: "[\"http://elasticsearch.platform.svc.cluster.local:9200\"]"
+          ports:
+            - containerPort: 5601
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: 1
+              memory: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kibana
+  namespace: platform
+spec:
+  selector:
+    app: kibana
+  ports:
+    - port: 5601
+      targetPort: 5601
+---
+# InfluxDB StatefulSet with persistent storage for metrics time series.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: influxdb
+  namespace: platform
+spec:
+  serviceName: influxdb
+  replicas: 2
+  selector:
+    matchLabels:
+      app: influxdb
+  template:
+    metadata:
+      labels:
+        app: influxdb
+    spec:
+      containers:
+        - name: influxdb
+          image: influxdb:2.7-alpine
+          env:
+            - name: DOCKER_INFLUXDB_INIT_MODE
+              value: setup
+            - name: DOCKER_INFLUXDB_INIT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: influxdb-admin
+                  key: username
+            - name: DOCKER_INFLUXDB_INIT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: influxdb-admin
+                  key: password
+            - name: DOCKER_INFLUXDB_INIT_ORG
+              value: enterprise
+            - name: DOCKER_INFLUXDB_INIT_BUCKET
+              value: sre-metrics
+          ports:
+            - containerPort: 8086
+          volumeMounts:
+            - name: influxdb-data
+              mountPath: /var/lib/influxdb2
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+      volumeClaimTemplates:
+        - metadata:
+            name: influxdb-data
+          spec:
+            storageClassName: ebs-gp3-ha
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 100Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: influxdb
+  namespace: platform
+spec:
+  selector:
+    app: influxdb
+  ports:
+    - port: 8086
+      targetPort: 8086
+---
+# Telegraf DaemonSet forwarding node metrics to InfluxDB and exposing for HPAs.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: telegraf
+  namespace: platform
+spec:
+  selector:
+    matchLabels:
+      app: telegraf
+  template:
+    metadata:
+      labels:
+        app: telegraf
+    spec:
+      serviceAccountName: platform-ops
+      containers:
+        - name: telegraf
+          image: telegraf:1.28-alpine
+          env:
+            - name: INFLUX_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: influxdb-admin
+                  key: token
+            - name: INFLUX_URL
+              value: http://influxdb.platform.svc.cluster.local:8086
+          volumeMounts:
+            - name: config
+              mountPath: /etc/telegraf/telegraf.conf
+              subPath: telegraf.conf
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 150m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+      volumes:
+        - name: config
+          configMap:
+            name: telegraf-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: telegraf-config
+  namespace: platform
+data:
+  telegraf.conf: |
+    [agent]
+      interval = "10s"
+      round_interval = true
+    [[inputs.cpu]]
+      percpu = true
+      totalcpu = true
+    [[inputs.mem]]
+    [[inputs.net]]
+    [[inputs.kubernetes]]
+      url = "https://kubernetes.default.svc"
+      bearer_token = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+      insecure_skip_verify = true
+    [[outputs.influxdb_v2]]
+      urls = ["http://influxdb.platform.svc.cluster.local:8086"]
+      token = "$INFLUX_TOKEN"
+      organization = "enterprise"
+      bucket = "sre-metrics"
+---
+# Netdata for lightweight real-time monitoring.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: netdata
+  namespace: platform
+spec:
+  selector:
+    matchLabels:
+      app: netdata
+  template:
+    metadata:
+      labels:
+        app: netdata
+    spec:
+      serviceAccountName: platform-ops
+      containers:
+        - name: netdata
+          image: netdata/netdata:stable
+          ports:
+            - containerPort: 19999
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 150m
+              memory: 256Mi
+            limits:
+              cpu: 300m
+              memory: 512Mi
+      tolerations:
+        - operator: Exists
+---
+# kube-state-metrics for Kubernetes object metrics consumed by Zabbix/InfluxDB.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-state-metrics
+  namespace: platform
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kube-state-metrics
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets", "nodes", "pods", "services", "resourcequotas"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-state-metrics
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kube-state-metrics
+subjects:
+  - kind: ServiceAccount
+    name: kube-state-metrics
+    namespace: platform
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-state-metrics
+  namespace: platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: kube-state-metrics
+  template:
+    metadata:
+      labels:
+        app: kube-state-metrics
+    spec:
+      serviceAccountName: kube-state-metrics
+      containers:
+        - name: kube-state-metrics
+          image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.10.0
+          ports:
+            - containerPort: 8080
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 100m
+              memory: 200Mi
+            limits:
+              cpu: 300m
+              memory: 400Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-state-metrics
+  namespace: platform
+spec:
+  selector:
+    app: kube-state-metrics
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+# Node exporter DaemonSet for system-level metrics.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: platform
+spec:
+  selector:
+    matchLabels:
+      app: node-exporter
+  template:
+    metadata:
+      labels:
+        app: node-exporter
+    spec:
+      hostPID: true
+      containers:
+        - name: node-exporter
+          image: quay.io/prometheus/node-exporter:v1.7.0
+          args:
+            - "--collector.filesystem.ignored-mount-points=^/(sys|proc|dev|host|etc)($|/)"
+          ports:
+            - containerPort: 9100
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 65534
+      tolerations:
+        - operator: Exists

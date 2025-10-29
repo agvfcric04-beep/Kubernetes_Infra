@@ -1,0 +1,178 @@
+# AWS EBS CSI driver StorageClass with multi-AZ replication via gp3 volumes.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ebs-gp3-ha
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: ebs.csi.aws.com
+parameters:
+  encrypted: "true"
+  type: gp3
+  csi.storage.k8s.io/fstype: ext4
+allowVolumeExpansion: true
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+allowedTopologies:
+  - matchLabelExpressions:
+      - key: topology.kubernetes.io/zone
+        values:
+          - us-east-1a
+          - us-east-1b
+          - us-east-1c
+---
+# Longhorn CSI StorageClass for on-prem deployments with replica scheduling.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-ha
+provisioner: driver.longhorn.io
+parameters:
+  numberOfReplicas: "3"
+  staleReplicaTimeout: "30"
+  fromBackup: ""
+allowVolumeExpansion: true
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+---
+# PersistentVolumeClaim using replicated storage for PostgreSQL backend.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: dev
+spec:
+  storageClassName: ebs-gp3-ha
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+---
+# ResourceQuota to cap namespace resource usage preventing noisy neighbors.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: dev-resource-quota
+  namespace: dev
+spec:
+  hard:
+    requests.cpu: "10"
+    requests.memory: 20Gi
+    limits.cpu: "20"
+    limits.memory: 40Gi
+    persistentvolumeclaims: "10"
+    requests.storage: 2Ti
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: staging-resource-quota
+  namespace: staging
+spec:
+  hard:
+    requests.cpu: "20"
+    requests.memory: 40Gi
+    limits.cpu: "40"
+    limits.memory: 80Gi
+    persistentvolumeclaims: "20"
+    requests.storage: 5Ti
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: prod-resource-quota
+  namespace: prod
+spec:
+  hard:
+    requests.cpu: "60"
+    requests.memory: 120Gi
+    limits.cpu: "120"
+    limits.memory: 240Gi
+    persistentvolumeclaims: "50"
+    requests.storage: 10Ti
+---
+# LimitRanges enforce per-pod QoS baselines (Guaranteed/Burstable mixes).
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: dev-limit-range
+  namespace: dev
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "500m"
+        memory: 512Mi
+      defaultRequest:
+        cpu: "250m"
+        memory: 256Mi
+      max:
+        cpu: "2"
+        memory: 2Gi
+      min:
+        cpu: "100m"
+        memory: 128Mi
+    - type: Pod
+      max:
+        cpu: "4"
+        memory: 4Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: staging-limit-range
+  namespace: staging
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "1"
+        memory: 1Gi
+      defaultRequest:
+        cpu: "500m"
+        memory: 512Mi
+      max:
+        cpu: "4"
+        memory: 8Gi
+      min:
+        cpu: "250m"
+        memory: 256Mi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: prod-limit-range
+  namespace: prod
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "2"
+        memory: 2Gi
+      defaultRequest:
+        cpu: "1"
+        memory: 1Gi
+      max:
+        cpu: "8"
+        memory: 16Gi
+      min:
+        cpu: "500m"
+        memory: 512Mi
+---
+# PriorityClass definitions to prioritize platform and production workloads.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: platform-critical
+value: 100000000
+preemptionPolicy: PreemptLowerPriority
+globalDefault: false
+description: "Ensures monitoring and security workloads are scheduled before others."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: prod-critical
+value: 90000000
+preemptionPolicy: PreemptLowerPriority
