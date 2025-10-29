@@ -1,0 +1,340 @@
+# RBAC roles and bindings enforcing least privilege across namespaces.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: platform-ops
+  namespace: platform
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-sync
+  namespace: dev
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: view-namespace-readonly
+  labels:
+    compliance: pci-dss
+rules:
+  - apiGroups: ["", "apps", "batch", "extensions"]
+    resources: ["pods", "services", "deployments", "replicasets", "daemonsets", "jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: platform-ops-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view-namespace-readonly
+subjects:
+  - kind: ServiceAccount
+    name: platform-ops
+    namespace: platform
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: namespace-deployer
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "endpoints", "pods", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dev-namespace-admin
+  namespace: dev
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dev-admin-binding
+  namespace: dev
+subjects:
+  - kind: Group
+    name: devops-dev-admins
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: dev-namespace-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dev-secret-manager
+  namespace: dev
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dev-secret-manager-binding
+  namespace: dev
+subjects:
+  - kind: ServiceAccount
+    name: vault-sync
+    namespace: dev
+roleRef:
+  kind: Role
+  name: dev-secret-manager
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: platform-secret-sync
+  namespace: platform
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["postgres-app-secret"]
+    verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: platform-secret-sync-binding
+  namespace: platform
+subjects:
+  - kind: ServiceAccount
+    name: vault-sync
+    namespace: dev
+roleRef:
+  kind: Role
+  name: platform-secret-sync
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: staging-readonly
+  namespace: staging
+rules:
+  - apiGroups: ["", "apps"]
+    resources: ["pods", "services", "deployments", "configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: staging-readonly-binding
+  namespace: staging
+subjects:
+  - kind: Group
+    name: qa-auditors
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: staging-readonly
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: prod-deployer
+  namespace: prod
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: [""]
+    resources: ["pods", "services", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: prod-deployer-binding
+  namespace: prod
+subjects:
+  - kind: Group
+    name: sre-prod-deployers
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: prod-deployer
+  apiGroup: rbac.authorization.k8s.io
+---
+# Gatekeeper installation namespace and operator deployment.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gatekeeper-system
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gatekeeper-controller-manager
+  namespace: gatekeeper-system
+  labels:
+    app: gatekeeper
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: gatekeeper
+  template:
+    metadata:
+      labels:
+        app: gatekeeper
+    spec:
+      serviceAccountName: gatekeeper-admin
+      containers:
+        - name: manager
+          image: openpolicyagent/gatekeeper:v3.12.0
+          args:
+            - "--operation=audit"
+            - "--log-level=INFO"
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gatekeeper-admin
+  namespace: gatekeeper-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gatekeeper-manager-role
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["config.gatekeeper.sh"]
+    resources: ["configs", "constrainttemplates", "constraints"]
+    verbs: ["*"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gatekeeper-manager-rolebinding
+subjects:
+  - kind: ServiceAccount
+    name: gatekeeper-admin
+    namespace: gatekeeper-system
+roleRef:
+  kind: ClusterRole
+  name: gatekeeper-manager-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# Gatekeeper constraint to forbid privileged pods and hostPath volumes.
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8spspprivileged
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sPSPPrivileged
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            allowedPrivileged:
+              type: boolean
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8spspprivileged
+
+        violation[{"msg": msg}] {
+          input.review.object.spec.containers[_].securityContext.privileged
+          msg := sprintf("Privileged containers are not allowed: %v", [input.review.object.metadata.name])
+        }
+        violation[{"msg": msg}] {
+          input.review.object.spec.volumes[_].hostPath
+          msg := sprintf("hostPath volumes are forbidden: %v", [input.review.object.metadata.name])
+        }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sPSPPrivileged
+metadata:
+  name: deny-privileged
+spec:
+  match:
+    kinds:
+      - apiGroups: [""], kinds: ["Pod"]
+      - apiGroups: ["apps"], kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+    namespaces:
+      - dev
+      - staging
+      - prod
+  parameters:
+    allowedPrivileged: false
+---
+# OPA Gatekeeper constraint to ensure Pods run as non-root.
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8spsprunasnonroot
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sPSPRunAsNonRoot
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8spsprunasnonroot
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.securityContext.runAsNonRoot
+          msg := sprintf("Container %s must set runAsNonRoot true", [container.name])
+        }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sPSPRunAsNonRoot
+metadata:
+  name: enforce-run-as-non-root
+spec:
+  match:
+    namespaces:
+      - dev
+      - staging
+      - prod
+      - platform

@@ -1,0 +1,61 @@
+# Namespaces for Istio control plane and mesh-enabled workloads.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: istio-system
+  labels:
+    istio-injection: disabled
+    pod-security.kubernetes.io/enforce: baseline
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mesh-apps
+  labels:
+    istio-injection: enabled
+    pod-security.kubernetes.io/enforce: restricted
+---
+# Istio base installation using IstioOperator for strict mTLS and ingress gateway.
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  name: istio-control-plane
+  namespace: istio-system
+spec:
+  profile: minimal
+  meshConfig:
+    enableAutoMtls: true
+    accessLogFile: /dev/stdout
+  components:
+    pilot:
+      k8s:
+        replicaCount: 2
+        overlays:
+          - kind: Deployment
+            name: istiod
+            patches:
+              - path: spec.template.spec.securityContext.runAsNonRoot
+                value: true
+    ingressGateways:
+      - name: istio-ingressgateway
+        namespace: istio-system
+        enabled: true
+        k8s:
+          service:
+            type: ClusterIP
+          hpaSpec:
+            minReplicas: 2
+            maxReplicas: 10
+  values:
+    global:
+      proxy:
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+      meshID: enterprise-mesh
+      multiCluster:
+        clusterName: primary

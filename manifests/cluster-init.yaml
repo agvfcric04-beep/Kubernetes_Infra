@@ -1,0 +1,131 @@
+# Cluster initialization configuration for kubeadm-based deployment
+# Ensures three control-plane nodes with stacked etcd in HA, and encryption at rest.
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+kubernetesVersion: v1.28.0
+controlPlaneEndpoint: "k8s-control-plane.internal:6443" # DNS record backed by load balancer across masters
+apiServer:
+  extraArgs:
+    audit-log-path: /var/log/kubernetes/apiserver/audit.log
+    audit-log-maxage: "30"
+    audit-log-maxbackup: "10"
+    audit-log-maxsize: "100"
+    authorization-mode: "Node,RBAC"
+    enable-admission-plugins: "NodeRestriction,PodSecurity,ValidatingAdmissionPolicy,MutatingAdmissionPolicy"
+    encryption-provider-config: /etc/kubernetes/pki/encryption-config.yaml
+  certSANs:
+    - "k8s-control-plane.internal"
+    - "10.0.0.10"
+    - "loadbalancer.example.com"
+controllerManager:
+  extraArgs:
+    bind-address: 0.0.0.0
+    node-monitor-grace-period: 40s
+    terminated-pod-gc-threshold: "12500"
+scheduler:
+  extraArgs:
+    bind-address: 0.0.0.0
+certificatesDir: /etc/kubernetes/pki
+clusterName: enterprise-ha
+etcd:
+  local:
+    dataDir: /var/lib/etcd
+    extraArgs:
+      election-timeout: "5000"
+      heartbeat-interval: "250"
+networking:
+  dnsDomain: cluster.local
+  podSubnet: 10.244.0.0/16
+  serviceSubnet: 10.96.0.0/12
+imageRepository: registry.k8s.io
+---
+# Encryption configuration Secret for API server to encrypt secrets at rest in etcd
+apiVersion: v1
+kind: Secret
+metadata:
+  name: etcd-encryption-config
+  namespace: kube-system
+  annotations:
+    kubeadm.kubernetes.io/component: kube-apiserver
+stringData:
+  encryption-config.yaml: |
+    apiVersion: apiserver.config.k8s.io/v1
+    kind: EncryptionConfiguration
+    resources:
+      - resources:
+          - secrets
+          - configmaps
+        providers:
+          - aescbc:
+              keys:
+                - name: key1
+                  # Replace this static example with a freshly generated 32 byte base64 string per environment.
+                  secret: "a2F5bmV3LWFuLWV4YW1wbGUtMzItYnl0ZS1rZXktYmFzZTY0IQ=="
+          - identity: {}
+---
+# Kubelet configuration to enforce TLS bootstrapping and event rate limits.
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+clusterDNS:
+  - 10.96.0.10
+readOnlyPort: 0
+evictionHard:
+  memory.available: "200Mi"
+  nodefs.available: "10%"
+featureGates:
+  RotateKubeletServerCertificate: true
+serverTLSBootstrap: true
+eventRecordQPS: 2
+---
+# Namespace definitions with Pod Security Standards labels enforcing baseline/restricted policies.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dev
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: "latest"
+    pod-security.kubernetes.io/audit: restricted
+    environment: dev
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: staging
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: "latest"
+    pod-security.kubernetes.io/audit: restricted
+    environment: staging
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: prod
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: "latest"
+    pod-security.kubernetes.io/audit: restricted
+    environment: prod
+---
+# Namespace for platform services (monitoring, logging, security tooling).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: platform
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: "latest"
+    pod-security.kubernetes.io/audit: baseline
+---
+# PodDisruptionBudgets for core control-plane add-ons to guarantee HA.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: coredns-pdb
+  namespace: kube-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      k8s-app: kube-dns
