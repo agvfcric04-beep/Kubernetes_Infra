@@ -1,0 +1,56 @@
+# Cluster initialization configuration for kubeadm-based deployment
+# Ensures three control-plane nodes with stacked etcd in HA. Additional
+# foundational Kubernetes manifests live in `cluster-foundation.yaml` and
+# must be applied after the control plane is online.
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+kubernetesVersion: v1.28.0
+controlPlaneEndpoint: "k8s-control-plane.internal:6443" # DNS record backed by load balancer across masters
+apiServer:
+  extraArgs:
+    audit-log-path: /var/log/kubernetes/apiserver/audit.log
+    audit-log-maxage: "30"
+    audit-log-maxbackup: "10"
+    audit-log-maxsize: "100"
+    authorization-mode: "Node,RBAC"
+    enable-admission-plugins: "NodeRestriction,PodSecurity,ValidatingAdmissionPolicy,MutatingAdmissionPolicy"
+    encryption-provider-config: /etc/kubernetes/pki/encryption-config.yaml
+  certSANs:
+    - "k8s-control-plane.internal"
+    - "10.0.0.10"
+    - "loadbalancer.example.com"
+controllerManager:
+  extraArgs:
+    bind-address: 0.0.0.0
+    node-monitor-grace-period: 40s
+    terminated-pod-gc-threshold: "12500"
+scheduler:
+  extraArgs:
+    bind-address: 0.0.0.0
+certificatesDir: /etc/kubernetes/pki
+clusterName: enterprise-ha
+etcd:
+  local:
+    dataDir: /var/lib/etcd
+    extraArgs:
+      election-timeout: "5000"
+      heartbeat-interval: "250"
+networking:
+  dnsDomain: cluster.local
+  podSubnet: 10.244.0.0/16
+  serviceSubnet: 10.96.0.0/12
+imageRepository: registry.k8s.io
+---
+# Kubelet configuration to enforce TLS bootstrapping and event rate limits.
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+clusterDNS:
+  - 10.96.0.10
+readOnlyPort: 0
+evictionHard:
+  memory.available: "200Mi"
+  nodefs.available: "10%"
+featureGates:
+  RotateKubeletServerCertificate: true
+serverTLSBootstrap: true
+eventRecordQPS: 2

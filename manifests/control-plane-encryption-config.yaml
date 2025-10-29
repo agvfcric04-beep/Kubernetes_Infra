@@ -1,0 +1,17 @@
+# Copy this file to `/etc/kubernetes/pki/encryption-config.yaml` on every
+# control-plane node before running `kubeadm init`. The kube-apiserver will
+# load it via the `encryption-provider-config` flag configured in
+# `cluster-init.yaml` to ensure secrets and ConfigMaps are encrypted at rest.
+apiVersion: apiserver.config.k8s.io/v1
+kind: EncryptionConfiguration
+resources:
+  - resources:
+      - secrets
+      - configmaps
+    providers:
+      - aescbc:
+          keys:
+            - name: key1
+              # Replace with a freshly generated 32 byte base64 string per environment.
+              secret: "a2F5bmV3LWFuLWV4YW1wbGUtMzItYnl0ZS1rZXktYmFzZTY0IQ=="
+      - identity: {}

@@ -1,0 +1,331 @@
+# Argo CD namespace and core components for GitOps pipeline.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argo-cd
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argocd-application-controller
+  namespace: argo-cd
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: argocd-application-controller
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: argocd-application-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: argocd-application-controller
+subjects:
+  - kind: ServiceAccount
+    name: argocd-application-controller
+    namespace: argo-cd
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argocd-repo-server
+  namespace: argo-cd
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: argocd-repo-server
+  template:
+    metadata:
+      labels:
+        app: argocd-repo-server
+    spec:
+      serviceAccountName: argocd-application-controller
+      containers:
+        - name: argocd-repo-server
+          image: quay.io/argoproj/argocd:v2.9.4
+          command:
+            - argocd-repo-server
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: argocd-application-controller
+  namespace: argo-cd
+spec:
+  serviceName: argocd-application-controller
+  replicas: 2
+  selector:
+    matchLabels:
+      app: argocd-application-controller
+  template:
+    metadata:
+      labels:
+        app: argocd-application-controller
+    spec:
+      serviceAccountName: argocd-application-controller
+      containers:
+        - name: controller
+          image: quay.io/argoproj/argocd:v2.9.4
+          command:
+            - argocd-application-controller
+          args:
+            - "--status-processors=20"
+            - "--operation-processors=10"
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 1
+              memory: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argocd-server
+  namespace: argo-cd
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: argocd-server
+  template:
+    metadata:
+      labels:
+        app: argocd-server
+    spec:
+      serviceAccountName: argocd-application-controller
+      containers:
+        - name: argocd-server
+          image: quay.io/argoproj/argocd:v2.9.4
+          args:
+            - "--insecure"
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: argocd-server
+  namespace: argo-cd
+spec:
+  selector:
+    app: argocd-server
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argo-cd
+data:
+  url: https://argocd.example.com
+  exec.enabled: "true"
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo-microservice
+  namespace: argo-cd
+spec:
+  destination:
+    namespace: dev
+    server: https://kubernetes.default.svc
+  project: default
+  source:
+    repoURL: https://github.com/example-org/Kubernetes_Infra.git
+    path: helm/microservice
+    targetRevision: main
+    helm:
+      releaseName: microservice
+      values: |
+        image:
+          repository: registry.example.com/demo/nginx
+          tag: "1.25"
+        ingress:
+          enabled: true
+          className: nginx-ha
+          hosts:
+            - host: demo.dev.example.com
+              paths:
+                - path: /
+                  pathType: Prefix
+          tls:
+            - secretName: demo-dev-tls
+              hosts:
+                - demo.dev.example.com
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 250m
+            memory: 256Mi
+        postgresql:
+          enabled: true
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+---
+# Cluster Autoscaler for AWS, annotate ServiceAccount for IAM Roles for Service Accounts (IRSA).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/EKSClusterAutoscalerRole
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-autoscaler
+rules:
+  - apiGroups: [""]
+    resources: ["events", "endpoints"]
+    verbs: ["create", "patch"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["watch", "list"]
+  - apiGroups: ["autoscaling.k8s.io"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["autoscaling"]
+    resources: ["replicasets", "statefulsets", "horizontalpodautoscalers"]
+    verbs: ["watch", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-autoscaler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-autoscaler
+subjects:
+  - kind: ServiceAccount
+    name: cluster-autoscaler
+    namespace: kube-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+  labels:
+    app: cluster-autoscaler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cluster-autoscaler
+  template:
+    metadata:
+      labels:
+        app: cluster-autoscaler
+    spec:
+      serviceAccountName: cluster-autoscaler
+      containers:
+        - name: cluster-autoscaler
+          image: registry.k8s.io/autoscaling/cluster-autoscaler:v1.28.0
+          command:
+            - ./cluster-autoscaler
+            - --cloud-provider=aws
+            - --skip-nodes-with-local-storage=false
+            - --expander=least-waste
+            - --balance-similar-node-groups
+            - --nodes=3:10:worker-group-1
+          env:
+            - name: AWS_REGION
+              value: us-east-1
+          resources:
+            requests:
+              cpu: 200m
+              memory: 300Mi
+            limits:
+              cpu: 500m
+              memory: 600Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+---
+# Horizontal Pod Autoscaler using external metrics from InfluxDB via custom metrics adapter.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web-frontend-hpa
+  namespace: dev
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: microservice-frontend
+  minReplicas: 3
+  maxReplicas: 15
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: influxdb_http_request_latency_ms
+        target:
+          type: AverageValue
+          averageValue: 150m
+---
+# PodDisruptionBudget for frontend to guarantee HA during maintenance.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: microservice-frontend-pdb
+  namespace: dev
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: microservice-frontend
